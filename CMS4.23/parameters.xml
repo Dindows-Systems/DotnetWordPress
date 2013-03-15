@@ -1,0 +1,26 @@
+<parameters>
+  <parameter
+    name="Application Path"
+    description="Full site path where you would like to install your application"
+    defaultValue=""
+    tags="iisapp"
+    >
+    <parameterEntry
+      type="ProviderPath"
+      scope="iisapp"
+      match="cms"
+      />
+  </parameter>
+  <parameter
+    name="SetAcl1"
+    description="Automatically sets write access for the application"
+    defaultValue="{Application Path}/app_data"
+    tags="Hidden"
+    >
+    <parameterEntry
+      type="ProviderPath"
+      scope="setAcl"
+      match="cms/app_data"
+      />
+  </parameter>
+</parameters>

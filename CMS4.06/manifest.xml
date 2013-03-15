@@ -1,0 +1,4 @@
+<MSDeploy.iisApp>
+  <iisApp path="cms"/>
+  <setAcl path="cms/app_data" setAclAccess="Modify" />
+</MSDeploy.iisApp>

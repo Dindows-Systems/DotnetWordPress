@@ -1,0 +1,157 @@
+﻿'News Sending plugin code
+'By Andrea Bruno
+Namespace WebApplication.Plugin		'Standard namespace obbligatory for all plugins
+	Public Class NewsSending
+		Public Shared WithEvents Plugin As PluginManager.Plugin = Initialize()
+		Shared Function Initialize() As PluginManager.Plugin
+      If Plugin Is Nothing AndAlso Not CurrentPluginRunning() Then
+        Plugin = New PluginManager.Plugin(, , , , PluginManager.Plugin.Characteristics.StandardPlugin, GetType(NewsSendingConfiguration), GetType(NewsSendingSharedConfiguration))
+
+        If Not IsLocal() AndAlso (Servers.Count = 0 OrElse My.Computer.Name = Servers(0)) Then
+
+          Timer = New Timers.Timer(60000 * 60) '60 minutes
+          Timer.Enabled = True
+          Timer.Start()
+
+          '**********  REMOVE:
+          'Timer_Elapsed(Nothing, Nothing)
+
+          'Else
+          'Timer.Enabled = False
+        End If
+      End If
+			Return Plugin
+		End Function
+		Shared Sub New()
+			'In multi-server configuration, enable the timer only for one server
+			'Timer_Elapsed(Nothing, Nothing)	'Test
+			Initialize()
+		End Sub
+
+		Public Shared WithEvents Timer As Timers.Timer
+
+		Private Shared SharedConfiguration As NewsSendingSharedConfiguration = Plugin.LoadSharedConfiguration
+
+		Class NewsSendingConfiguration
+			Public SourceLanguage As Language = Language.English
+			Public TargetLanguage As Language = Language.NotDefinite
+			Public Recipients(-1) As SendTo
+		End Class
+
+		Class NewsSendingSharedConfiguration
+			Public Enabled As Boolean
+			Public LogDelivery As Boolean
+			Public NewsSendingConfiguration As New NewsSendingConfiguration
+		End Class
+
+		Class SendTo
+			Public Email As String
+			Public LimitForwardsPerHour As Integer = 1
+		End Class
+
+    Private Shared Sub SubAddLinks(ByRef Text As String, ByVal Setting As SubSite)
+      If Setting.SEO.ApplyCorrelatedWordsFromOtherSites Then
+        ContextualLink.AddContextualLinks(Text, Setting, Setting.MainArchive, , , True)
+      End If
+    End Sub
+
+		Private Shared Sub Timer_Elapsed(ByVal sender As Object, ByVal e As System.Timers.ElapsedEventArgs) Handles Timer.Elapsed
+			Log("NewsSendingDebug", 100, "Elapsed")
+			Try
+				For Each SubSite As SubSite In AllSubSite()
+					If Plugin.IsEnabled(SubSite) Then
+
+						Log("NewsSendingDebug", 100, "subsite", SubSite.Name)
+
+						Dim Config As NewsSendingConfiguration
+						If SharedConfiguration.Enabled Then
+							Config = SharedConfiguration.NewsSendingConfiguration
+						Else
+							Config = Plugin.LoadObject(GetType(NewsSendingConfiguration), SubSite.Name)
+						End If
+						If Config.Recipients.Count <> 0 Then
+							Dim NewsRequired As New NewsRequire
+							If Config.SourceLanguage = Language.NotDefinite Then
+								Config.SourceLanguage = Language.English
+							End If
+							Dim Ln As String
+							If SubSite.Language = Language.Chinese Then
+								Ln = "zh-CN"
+							Else
+								Ln = LCase(Acronym(SubSite.Language))
+							End If
+							NewsRequired.XmlHref = "http://news.google.com/news?q=" & "" & "&hl=" & Ln & "&gl=" & Ln & "&as_qdr=h&as_drrb=q&cf=all&scoring=d&output=rss"	'Request news of last hour
+							Dim Records As Collections.Generic.List(Of Notice) = New Collections.Generic.List(Of Notice)
+							Dim Gmt As Date = Now.ToUniversalTime
+							ReadFeed(Records, NewsRequired, , True)
+
+							'Remove not recents (>last hour)
+							For N As Integer = Records.Count - 1 To 0 Step -1
+								If Not Recent(Now.ToUniversalTime, Records(N).pubDate, New TimeSpan(1, 0, 0)) Then
+									Records.RemoveAt(N)
+								End If
+							Next
+
+							Dim ProgressiveSended As Integer = 0
+							For Each ThisNews As Notice In Records
+								ProgressiveSended += 1
+								Try
+
+									Dim WebSiteSummary As WebSiteSummary
+									WebSiteSummary = RielaborationTextFromWeb(ThisNews.Link, Config.SourceLanguage)
+
+									Dim Page As String = ""
+									Try
+										Page = ReadHtmlFromWeb(ThisNews.Link)
+									Catch ex As Exception
+										'Time out error
+									End Try
+									If Page <> "" Then
+										Dim Tag As New MetaTags(Page)
+										'Delivery advise via email
+										For Each SendTo As SendTo In Config.Recipients
+
+											If IsEmail(SendTo.Email) Then
+												Dim Mail As New Control
+												'Dim Html As String = ThisNews.Description
+												Dim Description As String = InnerText(ThisNews.Description)
+												If Len(Tag.Description) >= Len(Description) Then
+													Description = System.Web.HttpUtility.HtmlEncode(Tag.Description)
+												End If
+												If Description <> "" Then
+													SubAddLinks(Description, SubSite)
+													Dim Text As New Literal
+													Text.Text = Description
+
+													Mail.Controls.Add(Text)
+													Mail.Controls.Add(BR)
+												End If
+
+												Dim Subject As String
+
+												Subject = ThisNews.Title
+
+												If SharedConfiguration.LogDelivery Then Log("NewsSendingDebug", 100, "send_b", ProgressiveSended, SendTo.Email)
+
+												SendEmail(Subject, ControlToText(Mail), SendTo.Email, , , False)
+
+											End If
+
+										Next
+									End If
+								Catch ex As Exception
+									Log("NewsSending", 100, "ERROR!", ex.Message, ex.Source, ex.StackTrace)
+								End Try
+							Next
+						End If
+					End If
+				Next
+
+			Catch ex As Exception
+				Log("NewsSending", 100, "ERROR!", ex.Message, ex.Source, ex.StackTrace)
+			End Try
+
+		End Sub
+	End Class
+
+End Namespace

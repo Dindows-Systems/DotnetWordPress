@@ -1,0 +1,311 @@
+﻿'News Bombing plugin code
+'By Andrea Bruno
+Namespace WebApplication.Plugin		'Standard namespace obbligatory for all plugins
+	Public Class NewsBombing
+		Public Shared WithEvents Plugin As PluginManager.Plugin = Initialize()
+		Shared Function Initialize() As PluginManager.Plugin
+      If Plugin Is Nothing AndAlso Not CurrentPluginRunning() Then
+        Plugin = New PluginManager.Plugin(, , , , PluginManager.Plugin.Characteristics.StandardPlugin, GetType(NewsBombingConfiguration), GetType(NewsBombingSharedConfiguration))
+        If Not IsLocal() AndAlso (Servers.Count = 0 OrElse My.Computer.Name = Servers(0)) Then
+          Timer = New Timers.Timer(60000 * 60) '60 minutes
+          Timer.Enabled = True
+          Timer.Start()
+
+          '**********  REMOVE:
+          'Timer_Elapsed(Nothing, Nothing)
+
+          'Else
+          'Timer.Enabled = False
+        End If
+      End If
+			Return Plugin
+		End Function
+		Shared Sub New()
+			'In multi-server configuration, enable the timer only for one server
+			'Timer_Elapsed(Nothing, Nothing)	'Test
+			Initialize()
+		End Sub
+
+		Public Shared WithEvents Timer As Timers.Timer
+
+		Private Shared SharedConfiguration As NewsBombingSharedConfiguration = Plugin.LoadSharedConfiguration
+
+		Class NewsBombingConfiguration
+			Public TwitterGateway As New TwitterGateway
+			Public Gateways(-1) As Gateway
+		End Class
+
+		Class NewsBombingSharedConfiguration
+			Public Enabled As Boolean
+			Public LogDelivery As Boolean
+			Public NewsBombingConfiguration As New NewsBombingConfiguration
+		End Class
+
+		Class TwitterGateway
+			Public Email As String
+			Public TweetThrough As TweetEmailPost
+			Public CaractersLimit As Integer = 140
+			Public ConsideringCaractersLinkLength As Integer = 19
+			Enum TweetEmailPost
+				Body
+				Subject
+			End Enum
+			Public LimitForwardsPerHour As Integer = 1
+		End Class
+
+
+		Class Gateway
+			Public Email As String
+			Public AddSubject As Boolean = True
+			Public AddLinkInSubject As Boolean = False
+			Public AddDescription As Boolean = True
+			Public AddContextualLinksToDescription As Boolean = True
+			Public AddBottomLink As Boolean
+			Public TargetBottomLink As LinkTargetType
+			Public AddKeywords As Boolean = True
+			Public AddText As String
+			Enum LinkTargetType
+				Iframe
+				Reader
+				Source
+			End Enum
+			Public SecondsOfPauseBetweenMessages As Integer = 30
+			Public LimitForwardsPerHour As Integer = 1
+		End Class
+
+    Private Shared Sub SubAddLinks(ByRef Text As String, ByVal Setting As SubSite)
+      If Setting.SEO.ApplyCorrelatedWordsFromOtherSites Then
+        ContextualLink.AddContextualLinks(Text, Setting, Setting.MainArchive, , , True)
+      End If
+    End Sub
+
+		Private Shared Sub Timer_Elapsed(ByVal sender As Object, ByVal e As System.Timers.ElapsedEventArgs) Handles Timer.Elapsed
+			Try
+				For Each SubSite As SubSite In AllSubSite()
+					If Plugin.IsEnabled(SubSite) Then
+						Dim Config As NewsBombingConfiguration
+						If SharedConfiguration.Enabled Then
+							Config = SharedConfiguration.NewsBombingConfiguration
+						Else
+							Config = Plugin.LoadObject(GetType(NewsBombingConfiguration), SubSite.Name)
+						End If
+						Dim TwitterEnabled As Boolean = IsEmail(Config.TwitterGateway.Email)
+						Dim Query As String = SubSite.KeyWords
+						If Query <> "" AndAlso (TwitterEnabled = True OrElse Config.Gateways.Count <> 0) Then
+              Query = """" & ReplaceBin(Query, ",", """ OR """) & """"
+							Query = System.Web.HttpUtility.UrlEncode(Query)
+							Dim NewsRequired As New NewsRequire
+							Dim Ln As String
+							If SubSite.Language = Language.Chinese Then
+								Ln = "zh-CN"
+							Else
+								Ln = LCase(Acronym(SubSite.Language))
+							End If
+							NewsRequired.XmlHref = "http://news.google.com/news?q=" & Query & "&hl=" & Ln & "&gl=" & Ln & "&as_qdr=h&as_drrb=q&cf=all&scoring=d&output=rss"	'Request news of last hour
+							Dim Records As Collections.Generic.List(Of Notice) = New Collections.Generic.List(Of Notice)
+							Dim Gmt As Date = Now.ToUniversalTime
+							ReadFeed(Records, NewsRequired, , True)
+							'Find the max records need
+							Dim MaxRecords As Integer = Config.TwitterGateway.LimitForwardsPerHour
+							For Each Gateway As Gateway In Config.Gateways
+								If Gateway.LimitForwardsPerHour > MaxRecords Then
+									MaxRecords = Gateway.LimitForwardsPerHour
+								End If
+							Next
+							'Remove not recents (>last hour)
+							For N As Integer = Records.Count - 1 To 0 Step -1
+								If Not Recent(Now.ToUniversalTime, Records(N).pubDate, New TimeSpan(1, 0, 0)) Then
+									Records.RemoveAt(N)
+								ElseIf N >= MaxRecords Then
+									Records.RemoveAt(N)
+								End If
+							Next
+							If Records.Count Then
+								Dim DomainConfiguration As DomainConfiguration
+								For Each DomainName As String In AllDomainNames()
+									DomainConfiguration = DomainConfiguration.Load(DomainName)
+									If DomainConfiguration IsNot Nothing AndAlso DomainConfiguration.SubSitesAvailable.Contains(SubSite.Name) Then
+                    Dim ProgressiveSended As Integer = 0
+										For Each ThisNews As Notice In Records
+                      Dim CriptedNews As String = CryptUrl(ThisNews.Link.Substring(ThisNews.Link.IndexOf("/"c) + 2))
+                      If CriptedNews IsNot Nothing Then
+                        ProgressiveSended += 1
+                        Dim Link As String = Common.Href(DomainConfiguration, SubSite.Name, True, "default.aspx", QueryKey.CryptedUrl, CriptedNews)
+                        Try
+                          Dim Page As String = ""
+                          Try
+                            Page = ReadHtmlFromWeb(ThisNews.Link)
+                          Catch ex As Exception
+                            'Time out error
+                          End Try
+                          If Page <> "" Then
+                            Dim Tag As New MetaTags(Page)
+                            Dim LinkLengt As Integer
+                            If Config.TwitterGateway.ConsideringCaractersLinkLength = 0 Then
+                              LinkLengt = Len(Link)
+                            Else
+                              LinkLengt = Config.TwitterGateway.ConsideringCaractersLinkLength
+                            End If
+
+                            'Delivery advise via Twitter Gateway
+                            If TwitterEnabled = True AndAlso ProgressiveSended <= Config.TwitterGateway.LimitForwardsPerHour Then
+                              Dim Message As String = ""
+                              Dim Title As String = ThisNews.Title & " "
+                              Title = ReplaceBin(Title, " - ", " ")
+                              Title = ReplaceBin(Title, ": ", ":")
+                              Dim KeyWords As String = Tag.KeyWords
+                              If KeyWords <> "" Then KeyWords = UCase("#" & ReplaceBin(ReplaceBin(KeyWords, " ", ""), ",", " #") & " ")
+                              If Config.TwitterGateway.CaractersLimit = 0 OrElse (Len(Title) + Len(KeyWords) + LinkLengt) <= Config.TwitterGateway.CaractersLimit Then
+                                Message = Title & KeyWords & Link
+                              ElseIf Len(Title) + LinkLengt <= Config.TwitterGateway.CaractersLimit Then
+                                Message = Title & Link
+                              ElseIf KeyWords <> "" AndAlso (Len(KeyWords) + LinkLengt <= Config.TwitterGateway.CaractersLimit) Then
+                                Message = KeyWords & Link
+                              ElseIf LinkLengt < Config.TwitterGateway.CaractersLimit Then
+                                Title = Left(Title, Config.TwitterGateway.CaractersLimit - LinkLengt - 1)
+                                Message = Title & " " & Link
+                              ElseIf LinkLengt <= Config.TwitterGateway.CaractersLimit Then
+                                Message = Link
+                              End If
+                              If Message <> "" Then
+                                Dim Subject As String = ""
+                                Dim Body As String = ""
+                                Select Case Config.TwitterGateway.TweetThrough
+                                  Case TwitterGateway.TweetEmailPost.Subject
+                                    Subject = Message
+                                  Case Else
+                                    Body = Message
+                                End Select
+
+                                If SharedConfiguration.LogDelivery Then Log("NewsBombingDebug", 100, "send_t", Subject, Body, Config.TwitterGateway.Email)
+
+                                Try
+                                  SendEmail(Subject, Body, Config.TwitterGateway.Email, , False, False)
+                                Catch ex As Exception
+                                  Log("NewsBombing", 100, "ERROR!", DomainName, Config.TwitterGateway.Email, ex.Message, ex.Source, ex.StackTrace)
+                                End Try
+
+                                If SharedConfiguration.LogDelivery Then Log("NewsBombingDebug", 100, "send_t", "end")
+
+
+                                Threading.Thread.Sleep(30000) '30 seconds pause
+                              End If
+                            End If
+
+                            'Delivery advise via setted Gateway
+                            For Each Gateway As Gateway In Config.Gateways
+                              If ProgressiveSended <= Gateway.LimitForwardsPerHour Then
+                                Dim Href As String = Nothing
+                                Select Case Gateway.TargetBottomLink
+                                  Case NewsBombing.Gateway.LinkTargetType.Reader
+                                    Href = Link
+                                  Case NewsBombing.Gateway.LinkTargetType.Iframe
+                                    Href = Common.Href(DomainConfiguration, SubSite.Name, True, "default.aspx", QueryKey.Show, "4", QueryKey.Url, ThisNews.Link)
+                                  Case NewsBombing.Gateway.LinkTargetType.Source
+                                    Href = ThisNews.Link
+                                End Select
+
+
+                                If IsEmail(Gateway.Email) Then
+                                  Dim Mail As New Control
+                                  If Gateway.AddDescription Then
+                                    'Dim Html As String = ThisNews.Description
+                                    Dim Description As String = InnerText(ThisNews.Description)
+                                    If Len(Tag.Description) >= Len(Description) Then
+                                      Description = System.Web.HttpUtility.HtmlEncode(Tag.Description)
+                                    End If
+                                    If Description <> "" Then
+                                      If Gateway.AddContextualLinksToDescription Then
+                                        SubAddLinks(Description, SubSite)
+                                      End If
+                                      Dim Text As New Literal
+                                      Text.Text = Description
+                                      Dim AddLink As New WebControls.HyperLink
+                                      AddLink.Text = "[...]"
+                                      AddLink.NavigateUrl = Href
+                                      Text.Text &= " " & ControlToText(AddLink)
+                                      Mail.Controls.Add(Text)
+                                      Mail.Controls.Add(BR)
+                                    End If
+                                  End If
+                                  If Gateway.AddBottomLink Then
+                                    Dim AddLink As New WebControls.HyperLink
+                                    AddLink.Text = Href
+                                    AddLink.NavigateUrl = Href
+                                    Mail.Controls.Add(BR)
+                                    Mail.Controls.Add(AddLink)
+                                    Mail.Controls.Add(BR)
+                                  End If
+                                  If Gateway.AddKeywords Then
+                                    If Tag.KeyWords <> "" Then
+                                      Dim Links As New Control
+                                      For Each KeyWord As String In Split(Tag.KeyWords, ",")
+                                        Dim Text As New WebControls.Label
+                                        Text.Text = KeyWord
+                                        Text.Style.Add("font-weight", "bold")
+                                        Links.Controls.Add(BR)
+                                        Links.Controls.Add(Text)
+                                      Next
+                                      Dim Html As String = ControlToText(Links)
+                                      If Gateway.AddContextualLinksToDescription Then
+                                        SubAddLinks(Html, SubSite)
+                                      End If
+                                      Dim Control As New Literal
+                                      Control.Text = Html
+                                      Mail.Controls.Add(Control)
+                                    End If
+                                  End If
+                                  If Gateway.AddText <> "" Then
+                                    Dim AddText As New WebControls.Label
+                                    AddText.Text = Gateway.AddText
+                                    AddText.Attributes.Add("font-style", "italic")
+                                    Mail.Controls.Add(BR)
+                                    Mail.Controls.Add(BR)
+                                    Mail.Controls.Add(AddText)
+                                  End If
+                                  Dim Subject As String
+                                  Subject = ""
+                                  If Gateway.AddSubject Then
+                                    Subject = ThisNews.Title
+                                    If Gateway.AddLinkInSubject Then
+                                      Subject &= " " & Href
+                                    End If
+                                  End If
+
+                                  If SharedConfiguration.LogDelivery Then Log("NewsBombingDebug", 100, "send_b", ProgressiveSended, Gateway.Email)
+
+                                  Try
+                                    SendEmail(Subject, ControlToText(Mail), Gateway.Email, , , False)
+                                  Catch ex As Exception
+                                    Log("NewsBombing", 100, "ERROR!", DomainName, Gateway.Email, ex.Message, ex.Source, ex.StackTrace)
+                                  End Try
+
+                                  If Gateway.SecondsOfPauseBetweenMessages >= 0 Then
+                                    Threading.Thread.Sleep(Gateway.SecondsOfPauseBetweenMessages * 1000)
+                                  End If
+                                End If
+
+                              End If
+                            Next
+                          End If
+                        Catch ex As Exception
+                          Log("NewsBombing", 100, "ERROR!", ex.Message, ex.Source, ex.StackTrace)
+                        End Try
+                      End If
+                    Next
+										Exit For
+									End If
+								Next
+							End If
+						End If
+					End If
+				Next
+
+			Catch ex As Exception
+				Log("NewsBombing", 100, "ERROR!", ex.Message, ex.Source, ex.StackTrace)
+			End Try
+
+		End Sub
+	End Class
+
+End Namespace
